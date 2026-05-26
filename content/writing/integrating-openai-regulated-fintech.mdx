@@ -1,0 +1,198 @@
+---
+title: "Integrating OpenAI APIs into a regulated fintech UI"
+date: "2026-05-26"
+summary: "Audit trails, prompt injection guardrails, and graceful degradation — what actually changes when LLMs touch financial data."
+tags:
+  - AI
+  - Fintech
+  - Security
+  - React
+published: true
+---
+
+Adding an LLM to a fintech product sounds exciting until someone from legal asks "how do we know what the model said?" The compliance requirements that govern financial advice don't care that language models are probabilistic. They want receipts.
+
+This is what we had to build at Picton Investments — an AI querying tool for financial advisors at Canadian banks, subject to IIROC and OSFI guidance. What follows is the stuff that doesn't show up in the OpenAI quickstart but will absolutely show up in your first security review.
+
+---
+
+## The problem with "just call the API"
+
+Most LLM integration tutorials stop at `openai.chat.completions.create()`. In a regulated context, that's where the real work starts:
+
+- Every AI-generated response needs an immutable audit record
+- Responses that could be construed as financial advice need attribution and confidence signals
+- Users must be able to flag and dispute AI-generated content
+- Model outputs cannot be the sole basis for any regulated decision
+
+---
+
+## Audit trail
+
+IIROC requires records related to client advice to be retained for seven years. Design for that up front — retrofitting an audit schema after the fact is miserable.
+
+```ts
+type AiAuditEvent = {
+  id: string;
+  sessionId: string;
+  userId: string;
+  model: string;             // "gpt-4o-2024-11-20", never "gpt-4o"
+  promptHash: string;        // SHA-256 of sanitized prompt — never raw text
+  responseId: string;        // OpenAI's ID for cross-referencing their logs
+  latencyMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  timestamp: string;         // ISO 8601, UTC
+  citationIds: string[];
+  flaggedForReview: boolean;
+};
+```
+
+**Don't store raw prompts.** Advisor prompts will contain client names, SINs, account numbers, and holdings. Hash them with SHA-256 instead. You get a stable identifier for "this exact query" without the PII liability. If you need full context for a regulatory investigation, keep it separately behind stricter access controls.
+
+**Store OpenAI's response ID.** Every completion response has an `id` field (`chatcmpl-abc123`). It's your cross-reference if a regulator ever asks what exactly the model returned.
+
+**Write the audit record synchronously, before returning to the client.** A background fire-and-forget sounds fine until your logging write starts silently failing and you have a gap in your audit trail. If the write fails, surface an error — don't let the advisor act on a response that has no record.
+
+The audit table is append-only. No updates, no soft deletes. Corrections are new rows with a `supersedes` foreign key.
+
+---
+
+## Prompt injection
+
+Advisors will paste client data directly into query fields. Not because they're careless — because it's fast. "What's the VaR on this portfolio?" and then the full holdings CSV. This is inevitable.
+
+That creates two problems: PII in prompts you can't store, and a prompt injection surface if the pasted text contains adversarial instructions.
+
+Sanitize before anything reaches the API. Flag rather than reject — strip the PII, let the query proceed, note the detection in the audit record.
+
+```ts
+function sanitizeAdvisorQuery(raw: string): { sanitized: string; piiDetected: boolean } {
+  let sanitized = raw;
+  let piiDetected = false;
+
+  // Canadian SIN: 000-000-000
+  if (/\b\d{3}[-\s]?\d{3}[-\s]?\d{3}\b/.test(sanitized)) {
+    sanitized = sanitized.replace(/\b\d{3}[-\s]?\d{3}[-\s]?\d{3}\b/g, "[REDACTED-SIN]");
+    piiDetected = true;
+  }
+
+  if (/\b[A-Z]{2}\d{8,12}\b/.test(sanitized)) {
+    sanitized = sanitized.replace(/\b[A-Z]{2}\d{8,12}\b/g, "[REDACTED-ACCOUNT]");
+    piiDetected = true;
+  }
+
+  return { sanitized, piiDetected };
+}
+```
+
+Use the messages array correctly. System instructions go in `system`, user input goes in `user` — never concatenate them into one string. RAG-injected documents go in the context with explicit delimiters:
+
+```
+<source id="1" title="Picton Enhanced Alpha Factsheet">
+...document content...
+</source>
+
+Answer using only the sources above. Cite by ID.
+```
+
+This makes it structurally harder for user input to escape into the instruction context.
+
+Rate limits should be set low — 60 requests per hour is plenty for a legitimate advisor. A user at 200/hr is either a script or a QA engineer who forgot they had a production token.
+
+---
+
+## Citation and confidence UI
+
+Advisors can't act on "the model said so." Every response needs to show which documents it drew from and how confident the system is.
+
+Our backend streamed responses as SSE with two event types: `delta` (token chunks) and `citation` (source references that could arrive mid-stream). The obvious approach — accumulate tokens into a string, render Markdown — breaks immediately when citations need to be interactive footnotes in a partially-complete response.
+
+The fix is a segment tree instead of a string:
+
+```ts
+type StreamSegment =
+  | { type: "text"; content: string }
+  | { type: "citation"; id: string; source: string; excerpt: string; confidence: number };
+
+function appendEvent(
+  segments: StreamSegment[],
+  event: DeltaEvent | CitationEvent
+): StreamSegment[] {
+  if (event.type === "delta") {
+    const last = segments.at(-1);
+    if (last?.type === "text") {
+      return [...segments.slice(0, -1), { ...last, content: last.content + event.content }];
+    }
+    return [...segments, { type: "text", content: event.content }];
+  }
+  return [...segments, { type: "citation", ...event }];
+}
+```
+
+React renders from the tree. Citation cards are keyboard-focusable and screen-reader-labelled while the rest of the response is still coming in.
+
+Confidence-based styling matters more than you'd expect. Advisors quickly learn to scan the citation indicators before reading the text. High confidence — green border, solid icon. Low confidence — amber border, dashed, tooltip saying the model is uncertain. They use this instinctively within a few sessions.
+
+For accessibility under streaming: announcing every token is unusable, but silence until completion is also wrong. We used a debounced `aria-live="polite"` region that batched tokens into ~500ms chunks. Completed citations triggered a distinct announcement: "Source added: Picton Enhanced Alpha Fund Factsheet, September 2023."
+
+---
+
+## Graceful degradation
+
+The AI going down should not stop an advisor from working. The static keyword search over the same documents needs to be a real feature, not a placeholder screen.
+
+Not all errors are equal:
+
+- **429** — rate limited, retry with backoff
+- **503** — OpenAI is down, fall back immediately to static search
+- **400** — malformed prompt, surface the error and clear the session
+- **network timeout** — retry once, then fall back
+
+```ts
+const { data, error } = useQuery({
+  queryKey: ["ai-response", queryHash],
+  queryFn: () => fetchAIResponse(query),
+  retry: (failureCount, error) => {
+    if (error instanceof RateLimitError) return failureCount < 3;
+    if (error instanceof ServiceUnavailableError) return false;
+    return failureCount < 1;
+  },
+  retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 10_000),
+});
+```
+
+A circuit breaker at the service layer stops retry storms from compounding an outage. After five failures in 60 seconds, all requests go straight to static search. A single probe request after 30 seconds tests recovery.
+
+When the AI is down, say so explicitly: "AI assistant temporarily unavailable, showing keyword search results." Name the fallback. Advisors who know what they're looking at trust the system more.
+
+---
+
+## Model version management
+
+Don't use `gpt-4o` in production. It's not pinned — OpenAI updates the model behind that name and the output characteristics change. Your audit records log the model version per request, and if a regulator asks what the model said six months ago, you need to point to an exact checkpoint.
+
+Use `gpt-4o-2024-11-20`.
+
+Migrating to a new version when one gets released or an old one gets retired:
+
+1. **Shadow mode first.** Run both models on a percentage of live requests, log both outputs, surface only the current model to users. Two weeks minimum.
+2. **Offline eval.** Export the shadow pairs, have a portfolio manager and compliance officer blind-score them. You're checking hallucination rate and citation accuracy, not just formatting.
+3. **Gradual rollout.** 5% → 50% → 100% over two weeks. Watch the advisor dispute-flag rate — that's your early signal if output quality drops.
+4. **Hold rollback capability for 30 days.** OpenAI gives several months notice before retiring versions. Use that window.
+
+---
+
+## What I'd do differently
+
+**Design the audit schema before writing any product code.** We did this right at Picton — had a compliance consultant in the room before the first API call was written — and the `AiAuditEvent` shape never changed. Most engineers treat the audit log as an afterthought and end up running a migration the week before launch.
+
+**Build streaming error handling before the happy path.** We rebuilt it twice. Version one assumed SSE streams either completed cleanly or threw an error. Production introduced a third case: partial tokens delivered, then nothing. No error event, no close, just a hanging connection. We had to add a stall timer, decide whether to surface the partial response or retry, and retrofit all of that onto a parser never designed for it. Design for the hung stream from the start.
+
+**Hash the system prompt in every audit record.** We tracked prompt changes in git but didn't store which version was active per audit event until halfway through. The fix is one line — short hash of the system prompt content on every record. Should have been there from day one.
+
+---
+
+The interesting parts of this problem are the streaming UI and the confidence styling. Everything else — append-only audit logs, input sanitization, circuit breakers, pinned model versions — is just the same discipline that applies to any system where the outputs have consequences. The LLM doesn't change the principles. It just adds a new place to apply them.
+
+Spend your first sprint on the audit infrastructure. The prompt will change a dozen times. The audit records are permanent.

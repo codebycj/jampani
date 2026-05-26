@@ -1,0 +1,100 @@
+---
+title: "Novabus Fleet Dashboard"
+client: "Novabus / Volvo Group (via Capgemini)"
+role: "React Developer (Frontend Architecht)"
+dates: "Feb 2022 – Mar 2024"
+teamSize: "2 frontend, 3 backend, 1 UX designer"
+summary: "A real-time fleet management dashboard for Novabus electric buses — live vehicle tracking on Mapbox, Chart.js time-series for energy and performance data, and a REST translation layer over legacy backend systems."
+tags:
+  - React
+  - TypeScript
+  - Mapbox GL JS
+  - Chart.js
+  - WebSockets
+  - REST APIs
+  - Capgemini
+  - Fleet Management
+featured: true
+---
+
+## Context
+
+Novabus is a Montréal-based subsidiary of Volvo Group that manufactures electric and hybrid transit buses for North American cities — Toronto, New York, Vancouver, and dozens of others. Their operations teams needed a single interface to monitor their growing electric fleet in real time: where the buses are, how much charge they have, which ones are underperforming, and why.
+
+I joined this project through Capgemini midway through the engagement, brought in specifically for the frontend velocity problem. The team had a solid backend and good data pipelines, but the UI was six weeks behind schedule and the client demo was immovable.
+
+## The problem
+
+The existing frontend was a prototype that had gradually become the "real" thing — jQuery with some React islands dropped in, inconsistent state management, and a Mapbox integration that re-fetched and re-rendered the entire map on every vehicle position update (every 5 seconds, with up to 400 buses).
+
+At 400 buses, the map re-render took 2.3 seconds on a mid-range laptop. During that window, the UI was completely frozen. This was not a demo problem; it was an operational problem — dispatchers couldn't interact with the map during the most critical update cycles.
+
+## Constraints
+
+- **Legacy API contracts**: The backend spoke a proprietary binary protocol that a separate team was wrapping in REST. We consumed that REST API and had no ability to change its structure or timing.
+- **Real-time without WebSockets** (initially): The REST wrapper team delivered polling endpoints, not a push channel. We had to build the real-time feel on top of `setInterval` polling, then migrate to WebSockets when they shipped — without disrupting the UI.
+- **Mapbox performance ceiling**: Mapbox GL JS is fast, but 400 animated markers updating every 5 seconds via the standard marker API is not. The solution had to stay within the Mapbox ecosystem (contract requirement — no deck.gl).
+- **Zero downtime during shift handoffs**: Dispatchers work 12-hour shifts. The app had to reconnect gracefully after network interruptions and not lose historical track data on reconnect.
+
+## Approach
+
+### Map performance: layers instead of markers
+
+The turning point was switching from Mapbox `Marker` objects (DOM elements, one per bus) to a `GeoJSON` source backed by a `symbol` layer. With this approach, the entire fleet position update is a single `map.getSource('fleet').setData(geojson)` call — Mapbox handles diffing and rendering on the GPU.
+
+```ts
+// Update all bus positions in one call — no per-marker DOM mutation
+map.getSource("fleet")?.setData({
+  type: "FeatureCollection",
+  features: buses.map((bus) => ({
+    type: "Feature",
+    geometry: { type: "Point", coordinates: [bus.lng, bus.lat] },
+    properties: {
+      id: bus.id,
+      stateOfCharge: bus.soc,
+      status: bus.status, // "active" | "charging" | "inactive" | "alert"
+      heading: bus.heading,
+    },
+  })),
+});
+```
+
+Bus status drove icon selection via Mapbox `match` expressions — no JavaScript involved in the visual logic. The 2.3-second freeze dropped to ~18ms.
+
+### Polling → WebSocket migration without re-architecture
+
+I built a thin `FleetDataSource` abstraction with a consistent interface for both polling and push:
+
+```ts
+interface FleetDataSource {
+  subscribe(onUpdate: (buses: Bus[]) => void): () => void;
+}
+
+class PollingSource implements FleetDataSource { /* ... */ }
+class WebSocketSource implements FleetDataSource { /* ... */ }
+```
+
+The React component only knew about `FleetDataSource` — never about `fetch` or `WebSocket`. When the backend team shipped the WebSocket endpoint three weeks later, the migration was a one-line change in the composition root. No component touched.
+
+### Chart.js for energy time-series
+
+Each bus detail panel showed 24 hours of rolling energy consumption, regenerative braking recovery, and state-of-charge. Chart.js was the client's preference (existing license and familiarity). The challenge was rendering 1,440 data points per metric across 3 metrics without lagging on selection changes.
+
+Two decisions made this workable:
+1. `decimation` plugin enabled with LTTB algorithm — Chart.js intelligently reduces point count while preserving visual shape.
+2. Chart instances were held in refs and `update()`d rather than destroyed and recreated on bus selection change — mount once, update data, call `update('none')` to skip animation.
+
+### Reconnection and state recovery
+
+On reconnect after a network interruption, we fetched the last 30 minutes of historical track data for each visible bus and replayed it into the source immediately before subscribing to live updates. This gave dispatchers a continuous visual track rather than a reset map on reconnect.
+
+## Outcome
+
+- Fleet map renders at 60fps at 400 buses — from a 2.3s freeze to imperceptible.
+- Client demo delivered on the revised schedule with all P0 features complete.
+- WebSocket migration shipped without a single user-facing regression.
+- Capgemini used the `FleetDataSource` abstraction pattern as a reference architecture for two subsequent IoT projects.
+
+## Stack
+
+React 18, TypeScript, Mapbox GL JS, Chart.js 4, React Query, Zustand (for bus selection state), Vite, CSS Modules.

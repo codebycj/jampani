@@ -1,0 +1,102 @@
+---
+title: "Scotiabank Component Library"
+client: "Scotiabank"
+role: "Senior Frontend Engineer"
+dates: "Jul 2021 – Jan 2022"
+teamSize: "4 frontend engineers, 2 UX designers, 1 accessibility specialist, 1 tech lead"
+summary: "An accessible, WCAG 2.1 AA compliant React component library for scotiabank.com, integrated with Adobe Experience Manager 6.5, published to a private NPM registry, and governed through Storybook."
+tags:
+  - React
+  - TypeScript
+  - Storybook
+  - WCAG 2.1 AA
+  - AEM 6.5
+  - Design Systems
+  - NPM Registry
+  - Accessibility
+featured: true
+---
+
+## Context
+
+Scotiabank is one of Canada's Big Six banks, with a digital presence spanning retail banking, wealth management, and international operations in over 30 countries. The scotiabank.com web experience is maintained by dozens of teams across multiple timezones — a classic large-org front-end consistency problem.
+
+Before this project, the bank's web pages were built with ad-hoc jQuery and scattered CSS. Each campaign team shipped their own version of a button, modal, or form field. The accessibility posture was inconsistent and the visual language drifted from the brand design system across product lines.
+
+My role was as a senior engineer on the design systems team, responsible for building and shipping the component library that would standardize this.
+
+## The problem
+
+"Just build a component library" sounds simple until you factor in the constraints:
+
+- **Adobe Experience Manager integration**: Marketing teams used AEM 6.5 as their CMS. Components had to be usable inside AEM's component model, which meant supporting AEM's HTL templating alongside React.
+- **Accessibility as a legal requirement**: OSFI guidance and Scotia's own commitments required WCAG 2.1 AA across all digital touchpoints. This wasn't a checkbox — external auditors tested against it annually.
+- **Multiple consuming teams with different skill levels**: Some teams had strong React engineers; others had contractors who mostly wrote CMS templates. The API surface had to be usable without deep React knowledge.
+- **Private NPM registry with governance**: Components had to go through a review gate before publishing. Versioning, deprecation notices, and changelogs had to be automated — the team couldn't manually manage this across 80+ components.
+
+## Approach
+
+### AEM + React bridge
+
+AEM 6.5 renders components server-side via HTL (formerly Sightly). The integration approach was a thin HTL template for each component that rendered a `<div data-component="Button" data-props='{"variant":"primary","label":"Learn more"}'>` marker. A small initialization script at page load found all markers and hydrated them with React.
+
+This "progressive hydration" pattern meant:
+- Authoring in AEM worked exactly as before — content authors used the AEM dialog to configure props.
+- React took over for all interactive behaviour.
+- SEO was preserved because HTL rendered real HTML before hydration.
+
+For marketing-only pages (no interactivity needed), components could opt into "static mode" and render pure HTML from HTL with no React bundle at all.
+
+### Accessibility as component API
+
+The hardest accessibility problems weren't contrast ratios — those are mechanical. They were the interaction patterns that WCAG requires but that most component libraries implement wrong: focus management in modals, keyboard navigation in date pickers, ARIA relationship attributes in composite widgets.
+
+Rather than bolting accessibility on after the fact, we made it part of the component API design:
+
+```tsx
+// Bad: accessibility as an afterthought
+<Modal open={open} onClose={close} />
+
+// Good: accessibility-first API
+<Modal
+  open={open}
+  onClose={close}
+  title="Confirm transfer"          // required — becomes aria-labelledby
+  description="This cannot be undone" // optional — becomes aria-describedby
+  initialFocus={confirmButtonRef}    // explicit focus target on open
+/>
+```
+
+`title` and `initialFocus` were **required props** — TypeScript enforced this at compile time. You could not ship a modal without accessible semantics because the type checker would not let you.
+
+We used `@radix-ui/react-dialog` as the primitive for modal, `@radix-ui/react-tabs` for tabs, and built our own for the more bank-specific patterns (OTP input, sortable data table) where existing primitives had gaps.
+
+### Storybook as the governance layer
+
+Storybook served three audiences with different needs:
+
+1. **Component consumers**: Interactive docs with live props table, copy-paste code examples.
+2. **Accessibility auditors**: Each component story included an `a11y` addon panel showing ARIA structure and any violations.
+3. **The CI pipeline**: Chromatic visual regression testing caught any unintended rendering change before review. A PR that changed the visual output of a shared component required explicit sign-off.
+
+Publishing was gated on a Storybook build and a `storybook-chromatic` approval from the design systems team. Patch versions published automatically; minor versions required a team review.
+
+### Design token pipeline
+
+Figma tokens (exported via the Figma Tokens plugin) fed into a Style Dictionary transform pipeline that generated:
+- CSS custom properties for web
+- A JSON token map for the Storybook docs
+- TypeScript literal types for the values that needed compile-time safety (like `colorPalette` enums)
+
+This meant designers could update the Scotiabank red and every downstream consumer got the update without touching component code.
+
+## Outcome
+
+- 84 components shipped and adopted across 12 product teams in the first year.
+- Passed external WCAG 2.1 AA audit with zero critical findings and two minor findings (both in third-party marketing embeds, not the component library).
+- First shared component for a new product team went from "install the package" to "first AEM-integrated page in review" in 3 days — down from a previously estimated 3 weeks.
+- Chromatic caught 23 unintended visual regressions in the first 6 months that would have reached production under the previous ad-hoc review process.
+
+## Stack
+
+React 17, TypeScript, Storybook 6, Chromatic, Radix UI, Style Dictionary, Rollup, Adobe Experience Manager 6.5, Jest, Testing Library, private Artifactory NPM registry.

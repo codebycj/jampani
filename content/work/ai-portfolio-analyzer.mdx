@@ -1,0 +1,102 @@
+---
+title: "AI Portfolio Analyzer"
+client: "Picton Investments"
+role: "Software Development Engineer"
+dates: "May 2024 – Current"
+teamSize: "2 frontend, 2 backend, 1 designer, 1 PM"
+summary: "An AI-powered natural language portfolio querying tool for financial advisors at Canadian banks — built as a white-label SaaS and deployed across multiple bank brands from a single codebase."
+tags:
+  - React
+  - Next.js
+  - TypeScript
+  - White-label SaaS
+  - AI / NLP
+  - OpenAI API
+  - Zod
+  - React Query
+  - Design Systems
+featured: true
+---
+
+## Context
+
+Picton Investments is a Toronto-based alternative asset manager with about $10B AUM. Their financial advisors at partner banks need fast, accurate answers about portfolio positioning, fund performance, and risk exposure — information that traditionally lived in PDF tear sheets and static dashboards.
+
+AI Portfolio Analyzer was their bet on changing that: a tool where advisors could ask plain-English questions ("How did the Enhanced Alpha fund perform in Q3 compared to the TSX?") and get structured, sourced answers tied to live fund data.
+
+## The problem
+
+The AI layer was already working — a backend team had built a solid retrieval-augmented generation pipeline over fund documents and Morningstar data feeds. The problem was the front: a prototype built in a weekend that was brittle, inaccessible, and impossible to white-label.
+
+Each bank partner had its own brand guidelines, colour system, and UX expectations. The first partner was scheduled to go live in four months. The existing code had hardcoded hex values, inline styles, and no component abstraction to speak of.
+
+## Constraints
+
+- **Multi-brand, zero fork**: All bank partners would run from the same codebase. No "copy and tweak" deployments.
+- **Regulated environment**: Each response had to surface its sources and generation confidence. Financial advisors cannot act on information they can't audit. Any hallucination or unsourced claim had to be visually distinguishable from a grounded answer.
+- **Accessibility**: Bank partner contracts required WCAG 2.1 AA compliance — this wasn't negotiable.
+- **Streaming**: Users expect LLM responses to stream, not appear in one block. Streaming had to work without breaking the citation UI or scroll position.
+- **Performance**: Initial render had to feel snappy on a corporate laptop on a VPN — Lighthouse score targets of 90+ on a throttled 3G simulation.
+
+## Approach
+
+### White-label architecture via CSS custom properties
+
+Rather than a theme provider with a React context, I used CSS custom properties injected at the `<html>` level from a server-side config. Each bank partner has a JSON config object (stored in the database, fetched at build time and as an RSC prop) that maps to a set of design tokens:
+
+```ts
+// lib/theme.ts
+export type BrandTokens = {
+  colorPrimary: string;
+  colorSurface: string;
+  fontHeading: string;
+  fontBody: string;
+  borderRadius: "none" | "sm" | "md" | "lg";
+};
+
+export function buildCSSVariables(tokens: BrandTokens): string {
+  return `
+    --color-primary: ${tokens.colorPrimary};
+    --color-surface: ${tokens.colorSurface};
+    --font-heading: ${tokens.fontHeading}, system-ui, sans-serif;
+    --font-body: ${tokens.fontBody}, system-ui, sans-serif;
+    --radius: ${radiusMap[tokens.borderRadius]};
+  `.trim();
+}
+```
+
+This meant zero JavaScript in the theme switch path — fonts, colours, and radii were all pure CSS. React had no knowledge of the brand; components just used `var(--color-primary)`. Adding a new bank partner was a config record, not a code change.
+
+### Citation-aware streaming UI
+
+The backend streamed responses as server-sent events with two event types: `delta` (token chunk) and `citation` (a source reference that could be interspersed mid-stream). The naive approach — append tokens to a string and render Markdown — fell apart immediately because citations arrived mid-sentence and had to become interactive footnotes.
+
+I implemented a streaming parser that maintained a tree of `TextNode | CitationNode` segments:
+
+```ts
+type StreamSegment =
+  | { type: "text"; content: string }
+  | { type: "citation"; id: string; source: string; excerpt: string; confidence: number };
+```
+
+Each incoming event either extended the last text node or inserted a new citation node. React rendered from this tree, which meant citation cards could be keyboard-focusable, screen-reader-labelled, and visually styled by confidence level — all while the rest of the response was still typing in.
+
+### Accessibility under streaming
+
+Screen reader announcements for streaming content are genuinely tricky. A live region that announces every token is unusable; silence until completion defeats the purpose. The solution was a debounced `aria-live="polite"` region that accumulated tokens and announced in ~500ms chunks — fast enough to feel live, slow enough to be parseable speech. Completed citations got a distinct announcement ("Source added: Picton Enhanced Alpha Fund Factsheet, September 2023").
+
+### Zod on the API boundary
+
+Every API response was validated against a Zod schema before it touched state. This caught three separate backend regressions during development that would have produced silent UI errors: a field rename, a date format change, and a nested array that became nullable. Zod's `.safeParse()` let us show a graceful degradation UI rather than a crash.
+
+## Outcome
+
+- Launched to the first bank partner on schedule, with two more in integration testing at contract end.
+- WCAG 2.1 AA audit passed on first external review (minor colour contrast fix on a secondary button was the only finding).
+- Lighthouse scores: Performance 93, Accessibility 100, Best Practices 100, SEO 92.
+- Zero production incidents related to the UI layer in the first 90 days.
+- The token-based theme system was adopted by the backend team for their admin portal with no modifications.
+
+## Stack
+
+React 18, Next.js 13 (App Router), TypeScript, Tailwind CSS, React Query, Zod, OpenAI streaming API, Storybook, Radix UI primitives, Vercel.

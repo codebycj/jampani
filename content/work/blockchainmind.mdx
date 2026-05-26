@@ -1,0 +1,51 @@
+---
+title: "Crypto Data Dashboards"
+client: "BlockchainMind Inc."
+role: "Full Stack Developer"
+dates: "Feb 2020 – Jun 2021"
+teamSize: "Small cross-functional team, Toronto"
+summary: "Data-driven web dashboards helping clients monitor and manage cryptocurrency portfolios, backed by a headless CMS and automated CI/CD pipelines running on Docker and Jenkins."
+tags:
+  - React
+  - JavaScript
+  - GraphQL
+  - Tailwind CSS
+  - Kontent CMS
+  - PostgreSQL
+  - Docker
+  - Jenkins
+  - CI/CD
+featured: false
+---
+
+## Context
+
+BlockchainMind is a Toronto-based company that built tooling for clients navigating the early-maturing cryptocurrency market. The core product was a suite of data-driven dashboards that let clients monitor live market data, portfolio positions, and historical trends across multiple digital assets.
+
+My role covered the full delivery cycle: React UI work, GraphQL integration, CMS wiring, and deployment automation through Jenkins and Docker.
+
+## The work
+
+### Data dashboards
+
+The main challenge was rendering large, frequently-updating datasets without degrading performance. Crypto market data arrives fast and in volume. A single dashboard view could aggregate prices, volume, on-chain metrics, and portfolio positions from several backend sources at once.
+
+I structured the components around normalized GraphQL queries so each widget fetched only what it needed and could be updated or swapped without cascading API changes. Client specs varied a lot between accounts, so reusability and clear prop boundaries mattered more than they would in a single-product codebase.
+
+### Headless CMS integration
+
+Marketing pages, help docs, and configurable dashboard labels all came from Kontent CMS. The integration pulled structured content through the delivery API over GraphQL so copy never got hardcoded into components.
+
+That let non-technical folks update content without a deploy, and the same content model worked across the dashboard UI, marketing site, and email.
+
+### Build tooling and bundling
+
+Build pipeline setup was also in scope: webpack configuration (and later evaluating Vite as an alternative), chunk splitting, and keeping bundle sizes in check as the feature set grew. Tailwind was configured for production purging to keep CSS output minimal.
+
+### CI/CD and deployment
+
+Set up Jenkins pipelines to automate testing, building, and deployment. Docker kept environments consistent across dev, staging, and prod, which put an end to the "works on my machine" failures that had been slowing releases. Integrated GitHub so merges to main triggered the full deployment flow without any manual steps.
+
+## Stack
+
+React, JavaScript (ES2020), Tailwind CSS, GraphQL, Kontent CMS, PostgreSQL, Jenkins, Docker, GitHub.
